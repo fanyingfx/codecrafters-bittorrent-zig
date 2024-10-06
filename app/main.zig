@@ -354,7 +354,7 @@ fn download_piece(filename: []u8, tmp_filename: []u8, index: u32, allocator: std
     var block_buf: [BLOCK_SIZE]u8 = undefined;
     const first_message = try read_message(stream, &block_buf);
     std.debug.assert(first_message.tag == .bitfield);
-    std.debug.print("Get bitfield!\n", .{});
+    // std.debug.print("Get bitfield!\n", .{});
 
     const intersted_message = Message{ .tag = .interested, .payload = &[_]u8{} };
     try send_message(writer, intersted_message, allocator);
