@@ -3,19 +3,18 @@ const stdout = std.io.getStdOut().writer();
 const bencode = @import("bencode.zig");
 const http = std.http;
 const net = std.net;
+const BLOCK_SIZE = 1 << 14;
 const Sha1 = std.crypto.hash.Sha1;
 const bytes2hex = std.fmt.fmtSliceHexLower;
+const RndGen = std.rand.DefaultPrng;
+
 const SocketAddress = struct {
-    ip: []u8,
+    ip: []const u8,
     port: u16,
 };
 
-// const BT = struct {
-
-// }
-
 fn parse_torrent(filename: []const u8, allocator: std.mem.Allocator) !bencode.BElement {
-    var buf: [1000]u8 = undefined;
+    var buf: [1024]u8 = undefined;
     const fileContent = try std.fs.cwd().readFile(filename, &buf);
     var context = bencode.BContext{ .content = fileContent, .idx = 0, .allocator = allocator };
     const belement = bencode.decodeBencode(&context) catch |e| {
@@ -63,6 +62,17 @@ fn BTUrl(torrent: bencode.BElement, allocator: std.mem.Allocator) ![]u8 {
     const url = std.fmt.allocPrint(allocator, "{s}?info_hash={s}&left={}&{s}", .{ main_url, encode_hash, left.integer, others });
     return url;
 }
+fn parse_address(address_str: []const u8) !SocketAddress {
+    const colon_pos = std.mem.indexOf(u8, address_str, ":");
+    if (colon_pos == null) {
+        try stdout.print("Wrong ip format {s}\n", .{address_str});
+        std.process.exit(1);
+    }
+    const ip = address_str[0..colon_pos.?];
+    const port_str = address_str[colon_pos.? + 1 ..];
+    const port = try std.fmt.parseInt(u16, port_str, 10);
+    return SocketAddress{ .ip = ip, .port = port };
+}
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const arena_alloc = arena.allocator();
@@ -89,16 +99,8 @@ pub fn main() !void {
     } else if (std.mem.eql(u8, command, "handshake")) {
         // 161.35.46.221:51414
         const filename = args[2];
-        const ip_port_str = args[3];
-        const colon_pos = std.mem.indexOf(u8, ip_port_str, ":");
-        if (colon_pos == null) {
-            try stdout.print("Wrong ip format {s}\n", .{ip_port_str});
-            std.process.exit(1);
-        }
-        const ip = ip_port_str[0..colon_pos.?];
-        const port_str = ip_port_str[colon_pos.? + 1 ..];
-        const port = try std.fmt.parseInt(u16, port_str, 10);
-        try cmd_handshake(filename, SocketAddress{ .ip = ip, .port = port }, arena_alloc);
+        const address_str = args[3];
+        try cmd_handshake(filename, try parse_address(address_str), arena_alloc);
     } else if (std.mem.eql(u8, command, "download_piece")) {
         if (!std.mem.eql(u8, args[2], "-o")) {
             try stdout.print("Wrong Argument in download_piece\n", .{});
@@ -106,7 +108,7 @@ pub fn main() !void {
         }
         const temp_dir = args[3];
         const filename = args[4];
-        const index = try std.fmt.parseInt(usize, args[5], 10);
+        const index = try std.fmt.parseInt(u32, args[5], 10);
         try download_piece(filename, temp_dir, index, arena_alloc);
     } else {
         try stdout.print("Unsupport command: {s}\n", .{command});
@@ -194,15 +196,15 @@ fn cmd_handshake(filename: []u8, peer_address: SocketAddress, alloctor: std.mem.
     const bt_header = [_]u8{19} ++ "BitTorrent protocol"; // 20
     const reverved_bytes: [8]u8 = [_]u8{0} ** 8; // 8
     const sha1 = try get_info_hash(torrent, alloctor); // 20
-    std.debug.assert(sha1.len==20);
+    std.debug.assert(sha1.len == 20);
     const peer_id = "00112233445566778899"; //20
     var writer = stream.writer();
     _ = try writer.write(bt_header ++ reverved_bytes);
     _ = try writer.write(sha1);
     _ = try writer.write(peer_id);
-    var buf: [1024]u8 = undefined;
+    var buf: [68]u8 = undefined;
     const resp_size = try stream.read(buf[0..]);
-    std.debug.assert(resp_size>=68);
+    std.debug.assert(resp_size >= 68);
     try stdout.print("Peer ID: {s}\n", .{bytes2hex(buf[48..resp_size])});
 }
 const PeerMessage = struct {
@@ -226,63 +228,161 @@ const MessageType = enum(u8) {
     }
 };
 // const MessageTag = [5]u8;
-const Message =struct{
+const Message = struct {
+    // length:u32,
     tag: MessageType,
     payload: []u8,
+
+    pub fn serialize(self: *const Message, allocator: std.mem.Allocator) ![]u8 {
+        var data = std.ArrayList(u8).init(allocator);
+        const length: u32 = @as(u32, @intCast(self.payload.len)) + 1;
+
+        var length_buf: [4]u8 = undefined;
+        std.mem.writeInt(u32, &length_buf, length, .big);
+        try data.appendSlice(&length_buf);
+        try data.append(@intFromEnum(self.tag));
+        try data.appendSlice(self.payload);
+        return data.toOwnedSlice();
+    }
+    pub fn deserialize(bytes: []u8, allocator: std.mem.Allocator) !Message {
+        // const length = std.mem.readInt(u32, bytes[0..4], .big);
+        // std.debug.print("message_length={}\n",.{length});
+        const tag: MessageType = @enumFromInt(bytes[0]);
+        const payload = if (bytes.len > 1)
+            bytes[1..]
+        else
+            &[_]u8{};
+        return Message{ .tag = tag, .payload = try allocator.dupe(u8, payload) };
+    }
 };
-fn download_piece(filename: []u8, tmp_dir: []u8, index: usize, allocator: std.mem.Allocator) !void {
-    _ = tmp_dir;
-    _ = index;
+fn read_message(stream: net.Stream, block_buf: []u8) !Message {
+    var length_buf: [4]u8 = undefined;
+    _ = try stream.read(&length_buf);
+    var length = std.mem.readInt(u32, &length_buf, .big);
+    while (length == 0) {
+        _ = try stream.read(&length_buf);
+        length = std.mem.readInt(u32, &length_buf, .big);
+    }
+    _ = try stream.readAll(block_buf);
+    const message_type: MessageType = @enumFromInt(block_buf[0]);
+    return Message{ .tag = message_type, .payload = block_buf[1..] };
+}
+fn send_message(writer: anytype, message: Message, allocator: std.mem.Allocator) !void {
+    const intersted_message_bytes = try message.serialize(allocator);
+
+    _ = try writer.write(intersted_message_bytes);
+}
+const PieceMessage = struct {
+    index: u32,
+    begin: u32,
+    block: []u8,
+
+    pub fn load(bytes: []u8) PieceMessage {
+        std.debug.assert(bytes.len > 8);
+        const index = std.mem.readInt(u32, bytes[0..4], .big);
+        const begin = std.mem.readInt(u32, bytes[4..8], .big);
+        return PieceMessage{ .index = index, .begin = begin, .block = bytes[8..] };
+    }
+};
+fn calculate_piece_block_total_count(piece_length: u32) u32 {
+    const block_size: u32 = BLOCK_SIZE;
+    var block_count: u32 = piece_length / block_size;
+    if (piece_length % block_size > 0) {
+        block_count += 1;
+    }
+    return block_count;
+}
+fn set_request_payload(piece_index: u32, index: u32, piece_length: u32, request_payload: []u8) void {
+    const block_size: u32 = BLOCK_SIZE;
+    var last_block_size = piece_length % block_size;
+    var last_block_index: u32 = piece_length / block_size;
+    if (last_block_size == 0) {
+        last_block_size = block_size;
+    } else {
+        last_block_index += 1;
+    }
+    // std.debug.print("last_block_index={}\n", .{last_block_index});
+    std.debug.assert(piece_index <= last_block_index);
+    var length = block_size;
+    if (index == last_block_index) {
+        length = last_block_size;
+    }
+    const begin = block_size * piece_index;
+    std.debug.print("piece_index={},begin={},length={},block_size={},piece_length={}\n", .{ piece_index, begin, length, block_size, piece_length });
+    std.mem.writeInt(u32, request_payload[0..4], index, .big);
+    std.mem.writeInt(u32, request_payload[4..8], begin, .big);
+    std.mem.writeInt(u32, request_payload[8..12], length, .big);
+}
+fn download_piece(filename: []u8, tmp_filename: []u8, index: u32, allocator: std.mem.Allocator) !void {
     const torrent = parse_torrent(filename, allocator) catch |e| {
         try stdout.print("{s}\n", .{@errorName(e)});
         std.process.exit(1);
     };
+    const infoElement = try torrent.queryDict("info");
+    const lengthElement = try infoElement.queryDict("length");
+    const total_length: u32 = @intCast(lengthElement.integer);
+    const pieces_lengthElement = try infoElement.queryDict("piece length");
+    const piece_length: u32 = @intCast(pieces_lengthElement.integer);
+    const current_piece_length = blk: {
+        if (index <= total_length / piece_length) {
+            break :blk piece_length;
+        }
+        break :blk total_length % piece_length;
+    };
+    var rnd = RndGen.init(0);
+    const random_index = rnd.random().int(usize) % 3 * 6;
     const peers_str = try get_peers_from_torrent(torrent, allocator);
-    const peer_address = try get_address_from_peer(peers_str[6..], allocator);
+    const peer_address = try get_address_from_peer(peers_str[random_index..], allocator);
+    try stdout.print("PeerAddress={s}:{}\n", .{ peer_address.ip, peer_address.port });
     const peer = try net.Address.parseIp4(peer_address.ip, peer_address.port);
     const stream = try net.tcpConnectToAddress(peer);
     defer stream.close();
     const bt_header = [_]u8{19} ++ "BitTorrent protocol"; // 20
     const reverved_bytes: [8]u8 = [_]u8{0} ** 8; // 8
     const sha1 = try get_info_hash(torrent, allocator); // 20
-    std.debug.assert(sha1.len==20);
+    std.debug.assert(sha1.len == 20);
     const peer_id = "00112233445566778899"; //20
     var writer = stream.writer();
     _ = try writer.write(bt_header ++ reverved_bytes);
     _ = try writer.write(sha1);
     _ = try writer.write(peer_id);
-    var buf: [1024]u8 = undefined;
-    var hand_shake_buf:[68]u8=undefined;
-    var resp_size = try stream.read(hand_shake_buf[0..]);
-    try stdout.print("resp_size:{}\n", .{resp_size});
-    try stdout.print("Handshake Success\nPeer ID: {s}\n", .{bytes2hex(buf[48..resp_size])});
-    resp_size=1;
-    // var tag: [5]u8 = [_]u8{ 0, 0, 0, 0, 1 };
-    // std.mem.writeInt(u32, tag[0..4], 1, .big);
-    // tag[4] = MessageType.bitfield.value();
-    
-
-    // _ = try writer.write(&tag);
-    // resp_size = try stream.read(&buf);
-    // if (resp_size == 0){
-    //     resp_size=try stream.read(&buf);
-    // }
-
+    // var buf: [32768]u8 = undefined;
+    var hand_shake_buf: [68]u8 = undefined;
+    _ = try stream.read(&hand_shake_buf);
     // try stdout.print("resp_size:{}\n", .{resp_size});
-    // try stdout.print("resp_msg_length:{}\n", .{std.mem.readInt(u32, buf[0..4], .big)});
-    // try stdout.print("type: {}\n", .{buf[4]});
+    try stdout.print("Handshake Success\nPeer ID: {s}\n", .{bytes2hex(hand_shake_buf[48..])});
+    var block_buf: [BLOCK_SIZE]u8 = undefined;
+    const first_message = try read_message(stream, &block_buf);
+    std.debug.assert(first_message.tag == .bitfield);
+    std.debug.print("Get bitfield!\n", .{});
 
-    // const request_id = [1]u8{MessageType.request.value()}; // interested
-    // std.mem.writeInt(u32,&length,1+12,.big);
-    // _ = try writer.write(&length);
-    // _ = try writer.write(&request_id);
-    // var request_message:[4*3]u8 = undefined;
-    // std.mem.writeInt(u32,request_message[0..4],0,.big);
-    // std.mem.writeInt(u32,request_message[4..8],0,.big);
-    // std.mem.writeInt(u32,request_message[8..],92063,.big);
-    // _ = try writer.write(&request_message);
-    // resp_size = try stream.read(&buf);
-    // try stdout.print("resp_size:{}\n",.{resp_size});
-    // try stdout.print("resp_msg_length:{}\n",.{std.mem.readInt(u32,buf[0..4],.big)});
-    // try stdout.print("type: {}\n", .{buf[4]});
+    const intersted_message = Message{ .tag = .interested, .payload = &[_]u8{} };
+    try send_message(writer, intersted_message, allocator);
+    const intersted_recv = try read_message(stream, &block_buf);
+    std.debug.assert(intersted_recv.tag == .unchoke);
+    std.debug.print("Get unchoke!\n", .{});
+
+    var request_payload: [4 * 3]u8 = undefined;
+    var piece_data = std.ArrayList(u8).init(allocator);
+    defer piece_data.deinit();
+    const block_count = calculate_piece_block_total_count(current_piece_length);
+    var i: u32 = 0;
+    while (i <= block_count) : (i += 1) {
+        set_request_payload(i, index, current_piece_length, &request_payload);
+        const request_message = Message{ .tag = .request, .payload = &request_payload };
+        try send_message(stream, request_message, allocator);
+
+        const piece_message_bytes = try read_message(stream,&block_buf);
+        std.debug.print("{s}\n", .{@tagName(piece_message_bytes.tag)});
+        std.debug.assert(piece_message_bytes.tag == .piece);
+        const piece_message = PieceMessage.load(piece_message_bytes.payload);
+        // std.debug.print("index={}, begin={}, block_length={}\n", .{ piece_message.index, piece_message.begin, piece_message.block.len });
+        try piece_data.appendSlice(piece_message.block);
+    }
+
+    const file = try std.fs.createFileAbsolute(tmp_filename, .{ .read = true });
+    defer file.close();
+
+    try file.writeAll(piece_data.items);
+    // std.debug.print("index={}, begin={}\n", .{ piece_data.index, piece_data.begin });
 }
