@@ -3,7 +3,7 @@ const stdout = std.io.getStdOut().writer();
 const bencode = @import("bencode.zig");
 const http = std.http;
 const net = std.net;
-const BLOCK_SIZE = 1 << 14;
+const BLOCK_SIZE = (1 << 14) + 20;
 const Sha1 = std.crypto.hash.Sha1;
 const bytes2hex = std.fmt.fmtSliceHexLower;
 const RndGen = std.rand.DefaultPrng;
@@ -14,7 +14,7 @@ const SocketAddress = struct {
 };
 
 fn parse_torrent(filename: []const u8, allocator: std.mem.Allocator) !bencode.BElement {
-    var buf: [1024]u8 = undefined;
+    var buf: [80000]u8 = undefined;
     const fileContent = try std.fs.cwd().readFile(filename, &buf);
     var context = bencode.BContext{ .content = fileContent, .idx = 0, .allocator = allocator };
     const belement = bencode.decodeBencode(&context) catch |e| {
@@ -263,7 +263,7 @@ fn read_message(stream: net.Stream, block_buf: []u8) !Message {
         _ = try stream.read(&length_buf);
         length = std.mem.readInt(u32, &length_buf, .big);
     }
-    _ = try stream.readAll(block_buf);
+    _ = try stream.readAll(block_buf[0..length]);
     const message_type: MessageType = @enumFromInt(block_buf[0]);
     return Message{ .tag = message_type, .payload = block_buf[1..] };
 }
@@ -330,7 +330,7 @@ fn download_piece(filename: []u8, tmp_filename: []u8, index: u32, allocator: std
         break :blk total_length % piece_length;
     };
     var rnd = RndGen.init(0);
-    const random_index = rnd.random().int(usize) % 3 * 6;
+    const random_index = rnd.random().int(usize) % 50 * 6;
     const peers_str = try get_peers_from_torrent(torrent, allocator);
     const peer_address = try get_address_from_peer(peers_str[random_index..], allocator);
     try stdout.print("PeerAddress={s}:{}\n", .{ peer_address.ip, peer_address.port });
@@ -351,14 +351,15 @@ fn download_piece(filename: []u8, tmp_filename: []u8, index: u32, allocator: std
     _ = try stream.read(&hand_shake_buf);
     // try stdout.print("resp_size:{}\n", .{resp_size});
     try stdout.print("Handshake Success\nPeer ID: {s}\n", .{bytes2hex(hand_shake_buf[48..])});
-    var block_buf: [BLOCK_SIZE]u8 = undefined;
-    const first_message = try read_message(stream, &block_buf);
+    var first_message_buf: [BLOCK_SIZE]u8 = undefined;
+    const first_message = try read_message(stream, & first_message_buf);
     std.debug.assert(first_message.tag == .bitfield);
-    // std.debug.print("Get bitfield!\n", .{});
+    std.debug.print("Get bitfield!\n", .{});
 
     const intersted_message = Message{ .tag = .interested, .payload = &[_]u8{} };
     try send_message(writer, intersted_message, allocator);
-    const intersted_recv = try read_message(stream, &block_buf);
+    var intersted_buf: [1024]u8 = undefined;
+    const intersted_recv = try read_message(stream, &intersted_buf);
     std.debug.assert(intersted_recv.tag == .unchoke);
     std.debug.print("Get unchoke!\n", .{});
 
@@ -368,6 +369,7 @@ fn download_piece(filename: []u8, tmp_filename: []u8, index: u32, allocator: std
     const block_count = calculate_piece_block_total_count(current_piece_length);
     var i: u32 = 0;
     while (i <= block_count) : (i += 1) {
+        var block_buf:[BLOCK_SIZE]u8=undefined;
         set_request_payload(i, index, current_piece_length, &request_payload);
         const request_message = Message{ .tag = .request, .payload = &request_payload };
         try send_message(stream, request_message, allocator);
@@ -380,6 +382,7 @@ fn download_piece(filename: []u8, tmp_filename: []u8, index: u32, allocator: std
         try piece_data.appendSlice(piece_message.block);
     }
 
+    std.debug.print("index={},Piece Hash={s}",.{index,bytes2hex(piece_data.items)});
     const file = try std.fs.createFileAbsolute(tmp_filename, .{ .read = true });
     defer file.close();
 
