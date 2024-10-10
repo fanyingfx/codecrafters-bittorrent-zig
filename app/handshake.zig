@@ -11,7 +11,7 @@ const Handshake = struct {
         var string_list = std.ArrayList(u8).initCapacity(allocator, 68) catch unreachable;
         defer string_list.deinit();
         errdefer unreachable;
-        const writer = string_list.fixedWriter();
+        const writer = string_list.writer();
         try writer.writeByte(0x13);
         _ = try writer.write(self.pstr);
         try writer.writeByteNTimes(0, 8);
@@ -30,13 +30,13 @@ const Handshake = struct {
         };
     }
 };
-pub fn handshake(stream:net.Stream, torrent_file: torrent.TorrentFile) !void {
+pub fn handshake(stream:net.Stream, torrent_file: torrent.TorrentFile,allocator:std.mem.Allocator) ![]u8 {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const arena_alloc = arena.allocator();
     // const stream = try net.tcpConnectToAddress(address);
     // defer stream.close();
-    const peer_id = "00112233445566778899"; //20
+    const peer_id = "00112233a45c66e78899"; //20
     const my_handshake = Handshake{ .info_hash = torrent_file.info_hash, .peer_id = peer_id };
 
     var writer = stream.writer();
@@ -46,8 +46,9 @@ pub fn handshake(stream:net.Stream, torrent_file: torrent.TorrentFile) !void {
     const resp_size = try stream.read(&buf);
     std.debug.assert(resp_size == 68);
     const recv_handshake = Handshake.read(&buf);
+    return allocator.dupe(u8,recv_handshake.peer_id);
 
-    std.debug.print("Peer ID: {s}\n", .{std.fmt.fmtSliceHexLower(recv_handshake.peer_id)});
+    // try stdout.print("Peer ID: {s}\n", .{std.fmt.fmtSliceHexLower(recv_handshake.peer_id)});
 }
 // pub fn main() !void {
 //     var gpa = std.heap.GeneralPurposeAllocator(.{}){};

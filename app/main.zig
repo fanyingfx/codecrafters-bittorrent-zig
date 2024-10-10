@@ -37,7 +37,7 @@ pub fn main() !void {
         const bt_torrent = try torrent.TorrentFile.parseTorrentFile(arena_alloc, file_content);
         try stdout.print("Tracker URL: {s}\n", .{bt_torrent.announce});
         try stdout.print("Length: {d}\n", .{bt_torrent.info.length});
-        try stdout.print("Info hash: {s}\n", .{bytes2hex(bt_torrent.info_hash)});
+        try stdout.print("Info Hash: {s}\n", .{bytes2hex(bt_torrent.info_hash)});
         try stdout.print("Piece Length: {d}\n", .{bt_torrent.info.piece_length});
         try stdout.print("Piece Hashes:\n", .{});
         for (bt_torrent.piece_hashes) |piece_hash| {
@@ -47,11 +47,12 @@ pub fn main() !void {
         const filename = args[2];
         const file_content = try std.fs.cwd().readFileAlloc(arena_alloc, filename, 65536);
         var bt_torrent = try torrent.TorrentFile.parseTorrentFile(arena_alloc, file_content);
-        const peer_addresses = bt_torrent.getPeerAddressesAlloc(arena_alloc);
-
-        for (peer_addresses) |peer_address| {
-            try peer_address.format("", .{}, stdout);
-            try stdout.writeByte('\n');
+        const peers_str = try bt_torrent.getPeers();
+        var i: usize = 0;
+        while (i < peers_str.len) : (i += 6) {
+            const port_buf: [2]u8 = [_]u8{ peers_str[i+4], peers_str[i+5] };
+            const port = std.mem.readInt(u16, &port_buf, .big);
+            try stdout.print("{d}.{d}.{d}.{d}:{d}\n", .{ peers_str[i], peers_str[i + 1], peers_str[i + 2], peers_str[i + 3],port });
         }
     } else if (std.mem.eql(u8, command, "handshake")) {
         const filename = args[2];
@@ -66,7 +67,9 @@ pub fn main() !void {
 
         const stream = try net.tcpConnectToAddress(address);
         defer stream.close();
-        try handshake.handshake(stream, bt_torrent);
+        const handshake_msg=try handshake.handshake(stream, bt_torrent,arena_alloc);
+        
+        try stdout.print("Peer ID: {s}\n",.{bytes2hex(handshake_msg)});
     } else if (std.mem.eql(u8, command, "download_piece")) {
         if (!std.mem.eql(u8, args[2], "-o")) {
             try stdout.print("Wrong Argument in download_piece\n", .{});

@@ -17,7 +17,8 @@ pub fn download_piece(allocator: std.mem.Allocator, bt_filename: []const u8, tmp
     const stream = try net.tcpConnectToAddress(peer_addresses[0]);
     defer stream.close();
     // handshake
-    try handshake.handshake(stream, bt_torrent);
+    const handshake_msg=try handshake.handshake(stream, bt_torrent,allocator);
+    defer allocator.free(handshake_msg);
 
     // read bitfield
     const bitfield_msg_length = message.readLength(stream);

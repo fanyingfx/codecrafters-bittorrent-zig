@@ -164,7 +164,8 @@ pub const BEContext = struct {
         while (context.currentChar() != 'e') {
             switch (context.currentChar()) {
                 '0'...'9' => context.idx += 1,
-                else => std.debug.panic("{} is not number\n", .{context.currentChar()}),
+                '-' => context.idx += 1,
+                else => std.debug.panic("{c} is not number\n", .{context.currentChar()}),
             }
         }
         const num = std.fmt.parseInt(i64, context.content[num_start..context.idx], 10) catch unreachable;

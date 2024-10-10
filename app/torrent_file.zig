@@ -74,14 +74,14 @@ pub const TorrentFile = struct {
         // std.debug.print("host={s}\n", .{uri.host.?.percent_encoded});
         return uri;
     }
-    fn getPeers(self: *const TorrentFile) ![]u8 {
+    pub fn getPeers(self: *const TorrentFile) ![]u8 {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const arena_alloc = arena.allocator();
 
         var url_list = std.ArrayList(u8).init(arena_alloc);
-        const peer_id = "00112233445566778899";
-        const port = 6881;
+        const peer_id = "x0a122334b5566x78c99";
+        const port = 6883;
         const url = try self.buildTrackerURL(url_list.writer(), peer_id, port);
         const server_header_buffer: []u8 = try arena_alloc.alloc(u8, 8 * 1024 * 4);
         defer arena_alloc.free(server_header_buffer);
