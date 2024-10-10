@@ -1,243 +1,298 @@
 const std = @import("std");
-const page_allocator = std.heap.page_allocator;
-pub const ParseError = error{
-    ElementError,
-    IntgerError,
-    StringError,
-    ListError,
-    DictError,
-    Overflow,
-    InvalidCharacter,
-    OutOfMemory,
-};
-pub const QueryError = error{ NotDict, QueryFailed };
+const Allocator = std.mem.Allocator;
+const expect = std.testing.expect;
 pub const BElement = union(enum) {
     pub const DictItem = struct { key: []const u8, value: BElement };
-    pub const Dict = []DictItem;
-    str: []const u8,
     integer: i64,
+    str: []const u8,
     list: []BElement,
-    dict: Dict,
-
-    pub fn toString(self: *const BElement, allocator: std.mem.Allocator) ![]const u8 {
-        var string = std.ArrayList(u8).init(allocator);
-
-        switch (self.*) {
-            .str => |v| {
-                try string.append('"');
-                try string.appendSlice(v);
-                try string.append('"');
-            },
-            .integer => |i| {
-                var buf: [1000]u8 = undefined;
-                const num_str = try std.fmt.bufPrint(&buf, "{}", .{i});
-                try string.appendSlice(num_str);
+    dict: []DictItem,
+    pub fn query(self:*const BElement,key:[]const u8) BElement{
+        std.debug.assert(self.* == .dict);
+        for (self.dict)|pair|{
+            if (std.mem.eql(u8,pair.key,key)){
+                return pair.value;
+            }
+        }
+        @panic("Key not exists");
+    }
+    pub fn deinit(self:*const BElement,allocator:Allocator) void{
+        switch(self.*){
+            .integer=>{},
+            .str  =>  {
+                // allocator.free(s);
             },
             .list => |l| {
-                var list_str = std.ArrayList(u8).init(allocator);
-                // defer list_str.deinit();
-                try list_str.append('[');
-                for (l) |v| {
-                    try list_str.appendSlice(try v.toString(allocator));
-                    try list_str.append(',');
+                for(l)|ele|{
+                    ele.deinit(allocator);
                 }
-                if (list_str.getLast() == ',') {
-                    _ = list_str.pop();
-                }
-                try list_str.append(']');
-                try string.appendSlice(list_str.items);
+                allocator.free(l);
             },
-            .dict => |pairs| {
-                var list_str = std.ArrayList(u8).init(allocator);
-                try list_str.append('{');
-                for (pairs) |pair| {
-                    try list_str.append('"');
-                    try list_str.appendSlice(pair.key);
-                    try list_str.append('"');
-                    try list_str.append(':');
-                    try list_str.appendSlice(try pair.value.toString(allocator));
-                    try list_str.append(',');
+            .dict => |pairs|{
+                for(pairs)|pair|{
+                    // allocator.free(pair.key);
+                    pair.value.deinit(allocator);
                 }
-                if (list_str.getLast() == ',') {
-                    _ = list_str.pop();
-                }
-                try list_str.append('}');
-                // std.debug.print("dict_str:{s}\n",.{list_str.items});
-                try string.appendSlice(list_str.items);
-            },
+                allocator.free(pairs);
+            }
         }
+    }
 
+    pub fn toString(self: *const BElement, allocator: Allocator) ![]const u8 {
+        var string = std.ArrayList(u8).init(allocator);
+        const writer = string.writer();
+        try writeString(self, writer);
+        defer string.deinit();
         return string.toOwnedSlice();
     }
-    pub fn queryDict(self: *const BElement, key: []const u8) !BElement {
+    fn writeString(self: *const BElement, writer: anytype) !void {
         switch (self.*) {
-            .dict => |pairs| {
-                for (pairs) |pair| {
-                    if (std.mem.eql(u8, pair.key, key)) {
-                        return pair.value;
+            .integer => |i| {
+                try writer.print("{d}", .{i});
+            },
+            .str => |s| {
+                try writer.print("\"{s}\"", .{s});
+            },
+            .list => |l| {
+                try writer.writeByte('[');
+                for (l, 0..) |e, i| {
+                    try e.writeString(writer);
+                    if (i < l.len - 1) { // skip the last element
+                        try writer.writeByte(',');
                     }
                 }
+                try writer.writeByte(']');
             },
-            else => return QueryError.NotDict,
+            .dict => |pairs| {
+                try writer.writeByte('{');
+                for (pairs, 0..) |pair, i| {
+                    try writer.print("\"{s}\":", .{pair.key});
+                    try pair.value.writeString(writer);
+                    if (i < pairs.len - 1) {
+                        try writer.writeByte(',');
+                    }
+                }
+                try writer.writeByte('}');
+            },
         }
-        return QueryError.QueryFailed;
+    }
+    pub fn encode(self: *const BElement, allocator: Allocator) ![]u8 {
+        var string = std.ArrayList(u8).init(allocator);
+        const writer = string.writer();
+        try writeEncodeString(self, writer);
+        defer string.deinit();
+        return try string.toOwnedSlice();
+    }
+    fn writeEncodeString(self: *const BElement, writer: anytype) !void {
+        switch (self.*) {
+            .integer => |i| try writer.print("i{d}e", .{i}),
+            .str => |s| try writer.print("{d}:{s}", .{ s.len, s }),
+            .list => |l| {
+                try writer.writeByte('l');
+                for (l) |e| {
+                    try e.writeEncodeString(writer);
+                }
+                try writer.writeByte('e');
+            },
+            .dict => |pairs| {
+                try writer.writeByte('d');
+                for (pairs) |pair| {
+                    // pair.key
+                    try writer.print("{d}:{s}", .{ pair.key.len, pair.key });
+                    try pair.value.writeEncodeString(writer);
+                }
+                try writer.writeByte('e');
+            },
+        }
     }
 };
-pub const BContext = struct {
-    const Self = @This();
-
-    idx: usize,
+pub const BEContext = struct {
+    allocator: Allocator,
     content: []const u8,
-    allocator: std.mem.Allocator,
+    idx: usize = 0,
 
-    pub fn current_char(self: *const Self) ?u8 {
-        if (self.idx >= self.content.len) {
-            return null;
-        }
+    fn currentChar(self: *const BEContext) u8 {
         return self.content[self.idx];
     }
-    pub fn peek_next_char(self: *const Self) ?u8 {
+    fn peekNext(self: *const BEContext) u8 {
         if ((self.idx + 1) >= self.content.len) {
-            return null;
+            std.debug.panic("Peek failed\n", .{});
         }
-        if ((self.idx + 1) < self.content.len) {
-            return self.content[self.idx + 1];
-        }
-        return null;
+        return self.content[self.idx + 1];
     }
-    pub fn advance(self: *Self) u8 {
-        defer self.idx += 1;
-        return self.current_char().?;
+
+    pub fn decode(context: *BEContext) BElement {
+        switch (context.currentChar()) {
+            '0'...'9' => return decodeString(context),
+            'i' => return decodeInteger(context),
+            'l' => return decodeList(context),
+            'd' => return decodeDict(context),
+            else => {
+                std.debug.panic("Decode Failed!", .{});
+            },
+        }
+    }
+    fn decodeString(context: *BEContext) BElement {
+        const content = context.content;
+
+        const colon_offset = std.mem.indexOf(u8, content[context.idx..], ":");
+        if (colon_offset == null) {
+            std.debug.panic("Wrong string format!,", .{});
+        }
+        const colon_idx: usize = context.idx + colon_offset.?;
+        const length = std.fmt.parseInt(u32, content[context.idx..colon_idx], 10) catch unreachable;
+        defer context.idx = colon_idx + length + 1;
+
+        // NOTE  the context should be live longer enough than all childern element in the later;
+        // const str = context.allocator.dupe(u8,content[(colon_idx + 1)..(colon_idx + length + 1)]) catch unreachable;
+        const str = content[(colon_idx + 1)..(colon_idx + length + 1)];
+        return BElement{ .str = str };
+    }
+    fn decodeInteger(context: *BEContext) BElement {
+        context.idx += 1; // skip 'i'
+        defer context.idx += 1; // skip the end 'e'
+
+        const cur_char = context.currentChar();
+        const next_char = context.peekNext();
+        if ((cur_char == '0' and next_char != 'e') or
+            (cur_char == '-' and next_char == '0') or
+            (cur_char == 'e'))
+        {
+            std.debug.panic("Wrong integer format", .{});
+        }
+        const num_start = context.idx;
+        while (context.currentChar() != 'e') {
+            switch (context.currentChar()) {
+                '0'...'9' => context.idx += 1,
+                else => std.debug.panic("{} is not number\n", .{context.currentChar()}),
+            }
+        }
+        const num = std.fmt.parseInt(i64, context.content[num_start..context.idx], 10) catch unreachable;
+        return BElement{ .integer = num };
+    }
+    fn decodeList(context: *BEContext) BElement {
+        context.idx += 1; // skip 'l'
+        defer {
+            // skip 'e'
+            std.debug.assert(context.currentChar() == 'e');
+            context.idx += 1;
+        }
+        // TODO find a better way to handle recusive alloc
+        // just using a arena
+        var bElementList = std.ArrayList(BElement).init(context.allocator);
+        defer bElementList.deinit();
+        while (context.currentChar() != 'e') {
+            bElementList.append(decode(context)) catch {
+                std.debug.panic("paring List failed!", .{});
+            };
+        }
+        const blist = bElementList.toOwnedSlice() catch unreachable;
+        return BElement{ .list = blist };
+    }
+    fn decodeDict(context: *BEContext) BElement {
+        context.idx += 1; //skip 'd'
+        defer {
+            // skip 'e'
+            std.debug.assert(context.currentChar() == 'e');
+            context.idx += 1;
+        }
+        var bElementDict = std.ArrayList(BElement.DictItem).init(context.allocator);
+        defer bElementDict.deinit();
+        while (context.currentChar() != 'e') {
+            const key = decodeString(context);
+            const value = decode(context);
+            // TODO find a better way to check key type
+            switch (key) {
+                .str => |key_str| {
+                    const ele = BElement.DictItem{ .key = key_str, .value = value };
+                    bElementDict.append(ele) catch unreachable;
+                },
+                else => unreachable,
+            }
+        }
+        const bDict = bElementDict.toOwnedSlice() catch unreachable;
+        return BElement{ .dict = bDict };
+    }
+};
+const TestContext = struct {
+    allocator: Allocator,
+    fn expect_be_str(self: *@This(), bestr: []const u8, str: []const u8) !void {
+        var context = BEContext{ .content = bestr, .allocator = self.allocator };
+        const bele = context.decode();
+        const bstr = try bele.toString(self.allocator);
+        defer self.allocator.free(bstr);
+        try expect(std.mem.eql(u8, bstr, str));
+    }
+    fn expect_encode(self: *@This(), str: []const u8) !void {
+        var context = BEContext{ .content = str, .allocator = self.allocator };
+        const bele = context.decode();
+        const bstr = try bele.encode(self.allocator);
+        try expect(std.mem.eql(u8,str,bstr));
     }
 };
 
-fn encodeStr(str: []const u8, allocator: std.mem.Allocator) ![]u8 {
-    var string = std.ArrayList(u8).init(allocator);
-    var buf: [256]u8 = undefined;
-    const num_str = try std.fmt.bufPrint(&buf, "{}:", .{str.len});
-    try string.appendSlice(num_str);
-    try string.appendSlice(str);
-    return string.toOwnedSlice();
+test "bcode element to string" {
+    std.testing.log_level = std.log.Level.info;
+    var test_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer test_arena.deinit();
+    const arena_alloc = test_arena.allocator();
+
+    const bstr = BElement{ .str = "bstr" };
+    const rstr = try bstr.toString(arena_alloc);
+    try expect(std.mem.eql(u8, rstr, "\"bstr\""));
+
+    const bint = BElement{ .integer = 32 };
+    const bnint = BElement{ .integer = -10 };
+    const bzero = BElement{ .integer = 0 };
+    try expect(std.mem.eql(u8, try bint.toString(arena_alloc), "32"));
+    try expect(std.mem.eql(u8, try bnint.toString(arena_alloc), "-10"));
+    try expect(std.mem.eql(u8, try bzero.toString(arena_alloc), "0"));
+
+    var bAlist = std.ArrayList(BElement).init(arena_alloc);
+    defer bAlist.deinit();
+    try bAlist.append(bstr);
+    try bAlist.append(bint);
+    const blist = try bAlist.toOwnedSlice();
+    const belist = BElement{ .list = blist };
+    try expect(std.mem.eql(u8, try belist.toString(arena_alloc), "[\"bstr\",32]"));
+
+    const dictItem = BElement.DictItem{ .key = "key", .value = bint };
+    var dict = [_]BElement.DictItem{dictItem};
+    const dictSlice = dict[0..];
+    const bdict = BElement{ .dict = dictSlice };
+    try expect(std.mem.eql(u8, try bdict.toString(arena_alloc), "{\"key\":32}"));
 }
-pub fn encodeElement(element: BElement, allocator: std.mem.Allocator) ![]u8 {
-    var string = std.ArrayList(u8).init(allocator);
-    var buf: [256]u8 = undefined;
-    switch (element) {
-        .str => |strVal| {
-            // const num_str = try std.fmt.bufPrint(&buf, "{}:", .{strVal.len});
-            // try string.appendSlice(num_str);
-            // try string.appendSlice(strVal);
-            try string.appendSlice(try encodeStr(strVal,allocator));
-        },
-        .integer => |intVal| {
-            const int_encode = try std.fmt.bufPrint(&buf, "i{}e", .{intVal});
-            try string.appendSlice(int_encode);
-        },
-        .list => |listVal| {
-            try string.append('l');
-            for (listVal) |ele| {
-                try string.appendSlice(try encodeElement(ele,allocator));
-            }
-            try string.append('e');
-        },
-        .dict => |dictVal| {
-            try string.append('d');
-            for (dictVal) |pair| {
-                // encode key
-                // const num_str = try std.fmt.bufPrint(&buf, "{}:", .{pair.key.len});
-                // try string.appendSlice(num_str);
-                // try string.appendSlice(pair.key);
-                try string.appendSlice(try encodeStr(pair.key,allocator));
-                // encode val
-                try string.appendSlice(try encodeElement(pair.value,allocator));
-            }
-            try string.append('e');
-        },
-    }
-    return try string.toOwnedSlice();
+test "simple to string" {
+    var tCtx = TestContext{ .allocator = std.testing.allocator };
+    try tCtx.expect_be_str("5:hello", "\"hello\"");
 }
-fn decodeElement(context: *BContext) ParseError!BElement {
-    switch (context.current_char().?) {
-        '0'...'9' => return try decodeString(context),
-        'i' => return try decodeInteger(context),
-        'l' => return try decodeList(context),
-        'd' => return try decodeDict(context),
-        else => {
-            return ParseError.ElementError;
-        },
-    }
+test "decode bcode string" {
+    std.testing.log_level = std.log.Level.info;
+
+    var test_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer test_arena.deinit();
+    const arena_alloc = test_arena.allocator();
+    var tCtx = TestContext{ .allocator = arena_alloc };
+
+    try tCtx.expect_be_str("5:hello", "\"hello\"");
+    try tCtx.expect_be_str("i69e", "69");
+    try tCtx.expect_be_str("li69e4:helle", "[69,\"hell\"]");
+    try tCtx.expect_be_str("lli69e4:hellee", "[[69,\"hell\"]]");
+    try tCtx.expect_be_str("d3:keyi69ee", "{\"key\":69}");
+    try tCtx.expect_be_str("d3:key" ++ "li69e4:helle" ++ "e", "{\"key\":[69,\"hell\"]}");
 }
 
-pub fn decodeBencode(context: *BContext) ParseError!BElement {
-    return try decodeElement(context);
-}
-fn decodeInteger(context: *BContext) ParseError!BElement {
-    context.idx += 1;
-    // const num_str = encodedValue[1..(encodedValue.len - 1)];
-    const current_char = context.current_char();
-    if ((current_char == '0' and context.peek_next_char() != 'e') or
-        (current_char == '-' and context.peek_next_char() == '0') or
-        current_char == 'e')
-    {
-        return ParseError.IntgerError;
-    }
-    var num_str = std.ArrayList(u8).init(context.allocator);
-    defer num_str.deinit();
-    while (context.current_char() != 'e') {
-        if (0 <= context.current_char().? and context.current_char().? <= '9') {
-            try num_str.append(context.advance());
-        } else {
-            return ParseError.IntgerError;
-        }
-    }
-    const num = try std.fmt.parseInt(i64, num_str.items, 10);
-    context.idx += 1;
-    return BElement{ .integer = num };
-}
-fn decodeString(context: *BContext) ParseError!BElement {
-    // 3:hel 1
-    const colon_offset = std.mem.indexOf(u8, context.content[context.idx..], ":");
-    if (colon_offset == null) {
-        return ParseError.StringError;
-    }
-    const colon_idx = context.idx + colon_offset.?;
-    // std.debug.print("colon_idx:{},num:{s}\n",.{colon_idx,context.content[context.idx..colon_idx]});
-    const length = try std.fmt.parseInt(u32, context.content[context.idx..colon_idx], 10);
-    defer context.idx += colon_offset.? + length + 1;
-    const str_dup = try std.heap.page_allocator.dupe(u8, context.content[colon_idx + 1 .. colon_idx + length + 1]);
-    return BElement{ .str = str_dup };
-}
-fn decodeList(context: *BContext) ParseError!BElement {
-    context.idx += 1; // for 'i'
-    var BElementList = std.ArrayList(BElement).init(context.allocator);
-    while (context.current_char().? != 'e') {
-        try BElementList.append(try decodeElement(context));
-    }
-    // std.debug.print("current_list: {s}\n", .{CMDList.items[0].str});
-    if (context.current_char() != 'e') {
-        return ParseError.ListError;
-    }
-    context.idx += 1; // for 'e'
-    return BElement{ .list = try BElementList.toOwnedSlice() };
-}
-fn decodeDict(context: *BContext) ParseError!BElement {
-    context.idx += 1;
-    var BElementDict = std.ArrayList(BElement.DictItem).init(context.allocator);
-    while (context.current_char().? != 'e') {
-        const key = try decodeString(context);
-        const value = try decodeElement(context);
-        switch (key) {
-            .str => |key_str| {
-                const ele = BElement.DictItem{ .key = key_str, .value = value };
-                try BElementDict.append(ele);
-            },
-            else => return ParseError.DictError,
-        }
-    }
-    if (context.current_char() != 'e') {
-        return ParseError.DictError;
-    }
-    context.idx += 1;
+test "encode bencode string" {
+    std.testing.log_level = std.log.Level.info;
 
-    return BElement{ .dict = try BElementDict.toOwnedSlice() };
+    var test_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer test_arena.deinit();
+    const arena_alloc = test_arena.allocator();
+    var tCtx = TestContext{ .allocator = arena_alloc };
+    try tCtx.expect_encode("5:hello");
+    try tCtx.expect_encode("i69e");
+    try tCtx.expect_encode("li69e4:helle");
+    try tCtx.expect_encode("lli69e4:hellee");
+    try tCtx.expect_encode("d3:keyi69ee");
+    try tCtx.expect_encode("d3:key" ++ "li69e4:helle" ++ "e");
 }
