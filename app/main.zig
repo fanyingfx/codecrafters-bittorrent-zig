@@ -8,7 +8,7 @@ const handshake = @import("handshake.zig");
 const Sha1 = std.crypto.hash.Sha1;
 const bytes2hex = std.fmt.fmtSliceHexLower;
 // const RndGen = std.rand.DefaultPrng;
-const client =@import("client.zig");
+const client = @import("client.zig");
 
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -50,9 +50,9 @@ pub fn main() !void {
         const peers_str = try bt_torrent.getPeers();
         var i: usize = 0;
         while (i < peers_str.len) : (i += 6) {
-            const port_buf: [2]u8 = [_]u8{ peers_str[i+4], peers_str[i+5] };
+            const port_buf: [2]u8 = [_]u8{ peers_str[i + 4], peers_str[i + 5] };
             const port = std.mem.readInt(u16, &port_buf, .big);
-            try stdout.print("{d}.{d}.{d}.{d}:{d}\n", .{ peers_str[i], peers_str[i + 1], peers_str[i + 2], peers_str[i + 3],port });
+            try stdout.print("{d}.{d}.{d}.{d}:{d}\n", .{ peers_str[i], peers_str[i + 1], peers_str[i + 2], peers_str[i + 3], port });
         }
     } else if (std.mem.eql(u8, command, "handshake")) {
         const filename = args[2];
@@ -67,9 +67,9 @@ pub fn main() !void {
 
         const stream = try net.tcpConnectToAddress(address);
         defer stream.close();
-        const handshake_msg=try handshake.handshake(stream, bt_torrent,arena_alloc);
-        
-        try stdout.print("Peer ID: {s}\n",.{bytes2hex(handshake_msg)});
+        const handshake_msg = try handshake.handshake(stream, bt_torrent.info_hash, arena_alloc);
+
+        try stdout.print("Peer ID: {s}\n", .{bytes2hex(handshake_msg)});
     } else if (std.mem.eql(u8, command, "download_piece")) {
         if (!std.mem.eql(u8, args[2], "-o")) {
             try stdout.print("Wrong Argument in download_piece\n", .{});
@@ -77,10 +77,19 @@ pub fn main() !void {
         }
         const temp_file = args[3];
         const bt_filename = args[4];
-        const piece_index:u32 = try std.fmt.parseInt(u32,args[5],10);
-        try client.download_piece(arena_alloc,bt_filename,temp_file,piece_index);
+        const piece_index: u32 = try std.fmt.parseInt(u32, args[5], 10);
+        try client.download_piece_to_file(arena_alloc, bt_filename, temp_file, piece_index);
         // const index = try std.fmt.parseInt(u32, args[5], 10);
         // try download_piece(filename, temp_dir, index, arena_alloc);
+    } else if (std.mem.eql(u8, command, "download")) {
+        if (!std.mem.eql(u8, args[2], "-o")) {
+            try stdout.print("Wrong Argument in download_piece\n", .{});
+            std.process.exit(1);
+        }
+        const temp_filename = args[3];
+        const bt_filename = args[4];
+        // TODO add multiple threads downloading
+        try client.downloadFile(arena_alloc, temp_filename, bt_filename);
     } else {
         try stdout.print("Unsupport command: {s}\n", .{command});
     }

@@ -69,10 +69,10 @@ pub fn readBody(stream: std.net.Stream, message_buf: []u8) !Message {
     const message_type: MessageID = @enumFromInt(message_buf[0]);
     return Message{ .ID = message_type, .payload = message_buf[1..] };
 }
-pub fn sendRequest(allocator: std.mem.Allocator, stream: std.net.Stream, bt_torrent: torrent.TorrentFile,index:u32,begin_index:u32) !void {
+pub fn sendRequest(allocator: std.mem.Allocator, stream: std.net.Stream, current_piece_length:u32,index:u32,begin_index:u32) !void {
     const request_payload = try allocator.alloc(u8, 3 * 4);
     defer allocator.free(request_payload);
-    const length = torrent.calculate_block_length(bt_torrent, index, begin_index);
+    const length = torrent.calculate_block_length(current_piece_length, begin_index);
     std.mem.writeInt(u32, request_payload[0..4], index, .big);
     std.mem.writeInt(u32, request_payload[4..8], begin_index*torrent.BLOCK_SIZE, .big);
     std.mem.writeInt(u32, request_payload[8..12], length, .big);

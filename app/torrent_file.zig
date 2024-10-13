@@ -131,14 +131,14 @@ pub const TorrentFile = struct {
         return if (index != last_pieces_index) info.piece_length else last_piece_length;
     }
 };
-pub fn calculate_block_length(bt_torrent: TorrentFile, index: u32, begin_index: u32) u32 {
-    const cur_piece_length = bt_torrent.current_piece_length(index);
+pub fn calculate_block_length(curr_piece_length:u32, begin_index: u32) u32 {
+    // const cur_piece_length = bt_torrent.current_piece_length(index);
     var length: u32 = undefined;
-    std.debug.assert(begin_index * BLOCK_SIZE < cur_piece_length); // safe check
-    if ((begin_index + 1) * BLOCK_SIZE < cur_piece_length) {
+    std.debug.assert(begin_index * BLOCK_SIZE < curr_piece_length); // safe check
+    if ((begin_index + 1) * BLOCK_SIZE < curr_piece_length) {
         length = BLOCK_SIZE;
     } else {
-        length = cur_piece_length - (begin_index * BLOCK_SIZE);
+        length = curr_piece_length - (begin_index * BLOCK_SIZE);
     }
     return length;
 }

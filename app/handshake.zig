@@ -30,14 +30,14 @@ const Handshake = struct {
         };
     }
 };
-pub fn handshake(stream:net.Stream, torrent_file: torrent.TorrentFile,allocator:std.mem.Allocator) ![]u8 {
+pub fn handshake(stream:net.Stream, info_hash:[]u8,allocator:std.mem.Allocator) ![]u8 {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const arena_alloc = arena.allocator();
     // const stream = try net.tcpConnectToAddress(address);
     // defer stream.close();
     const peer_id = "00112233a45c66e78899"; //20
-    const my_handshake = Handshake{ .info_hash = torrent_file.info_hash, .peer_id = peer_id };
+    const my_handshake = Handshake{ .info_hash = info_hash, .peer_id = peer_id };
 
     var writer = stream.writer();
     const my_handshake_msg = my_handshake.serialize(arena_alloc);
